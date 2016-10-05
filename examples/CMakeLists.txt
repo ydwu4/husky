@@ -76,3 +76,9 @@ add_executable(PR_CC pr_cc_attrlist.cpp)
 target_link_libraries(PR_CC ${husky})
 target_link_libraries(PR_CC ${EXTERNAL_LIB})
 set_property(TARGET PR_CC PROPERTY CXX_STANDARD 14)
+
+# Cube
+add_executable(Cube cube.cpp)
+target_link_libraries(Cube ${husky})
+target_link_libraries(Cube ${EXTERNAL_LIB})
+set_property(TARGET Cube PROPERTY CXX_STANDARD 14)
