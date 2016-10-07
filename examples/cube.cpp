@@ -46,17 +46,28 @@ class Group {
 void cube() {
     // Get group set masks
     std::string schema_conf = husky::Context::get_param("schema");
+    std::string select_conf = husky::Context::get_param("select");
     std::string group_conf = husky::Context::get_param("group_sets");
-    boost::char_separator<char> space_sep(" ");
+    boost::char_separator<char> comma_sep(",");
     boost::char_separator<char> colon_sep(":");
-    boost::tokenizer<boost::char_separator<char>> schema_tok(schema_conf, space_sep);
+    boost::tokenizer<boost::char_separator<char>> schema_tok(schema_conf, comma_sep);
+    boost::tokenizer<boost::char_separator<char>> select_tok(select_conf, comma_sep);
     boost::tokenizer<boost::char_separator<char>> group_set_tok(group_conf, colon_sep);
-    // Group set contains the indices of selected columns
+    // Convert select to indices
+    std::vector<int> select;
+    for (auto& s : select_tok) {
+        auto it = std::find(schema_tok.begin(), schema_tok.end(), s);
+        if (it != schema_tok.end()) {
+            select.push_back(std::distance(schema_tok.begin(), it));
+        }
+        // TODO(Ruihao): Throw expection if input is wrong?
+    }
+    // Convert group sets to indices
     size_t group_set_size = std::distance(group_set_tok.begin(), group_set_tok.end());
     std::vector<std::vector<int>> group_sets(group_set_size);
     int i = 0;
     for (auto& group : group_set_tok) {
-        boost::tokenizer<boost::char_separator<char>> colomn_tok(group, space_sep);
+        boost::tokenizer<boost::char_separator<char>> colomn_tok(group, comma_sep);
         for (auto column : colomn_tok) {
             auto it = std::find(schema_tok.begin(), schema_tok.end(), column);
             if (it != schema_tok.end()) {
@@ -91,14 +102,17 @@ void cube() {
         for (size_t i = 0; i < group_sets.size(); ++i) {
             int j = 0;
             for (auto val : tok) {
-                // The colomn is selected
-                if (std::find(group_sets[i].begin(), group_sets[i].end(), j) != group_sets[i].end()) {
-                    key += val;
-                } else {
-                    key += "*";
-                }
-                if (j == fuid_index) {
-                    fuid = val;
+                // j-th colomn is selected
+                if (std::find(select.begin(), select.end(), j) != select.end()) {
+                	// j-th column is in the group set
+                    if (std::find(group_sets[i].begin(), group_sets[i].end(), j) != group_sets[i].end()) {
+                        key += val;
+                    } else {
+                        key += "*";
+                    }
+                    if (j == fuid_index) {
+                        fuid = val;
+                    }
                 }
                 ++j;
             }
@@ -127,6 +141,7 @@ int main(int argc, char** argv) {
     args.push_back("hdfs_namenode_port");
     args.push_back("input");
     args.push_back("schema");
+    args.push_back("select");
     args.push_back("group_sets");
     if (husky::init_with_args(argc, argv, args)) {
         husky::run_job(cube);
