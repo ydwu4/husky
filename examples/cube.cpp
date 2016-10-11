@@ -104,7 +104,7 @@ void cube() {
             for (auto val : tok) {
                 // j-th colomn is selected
                 if (std::find(select.begin(), select.end(), j) != select.end()) {
-                	// j-th column is in the group set
+                    // j-th column is in the group set
                     if (std::find(group_sets[i].begin(), group_sets[i].end(), j) != group_sets[i].end()) {
                         key += val;
                     } else {
@@ -126,7 +126,7 @@ void cube() {
     husky::list_execute(group_list, [&ch](Group& g) {
         std::string res;
         auto& msgs = ch.get(g);
-        std::vector<std::string> uid(msgs);
+        std::vector<std::string> uid(std::move(const_cast<std::vector<std::string>&>(msgs)));
         res += std::to_string(uid.size());
         std::sort(uid.begin(), uid.end());
         auto last = std::unique(uid.begin(), uid.end());
