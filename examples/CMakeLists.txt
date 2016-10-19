@@ -82,3 +82,9 @@ add_executable(Cube cube.cpp)
 target_link_libraries(Cube ${husky})
 target_link_libraries(Cube ${EXTERNAL_LIB})
 set_property(TARGET Cube PROPERTY CXX_STANDARD 14)
+
+# Cube-BUC
+add_executable(Cube-BUC cube_buc.cpp)
+target_link_libraries(Cube-BUC ${husky})
+target_link_libraries(Cube-BUC ${EXTERNAL_LIB})
+set_property(TARGET Cube-BUC PROPERTY CXX_STANDARD 14)
