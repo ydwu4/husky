@@ -19,7 +19,10 @@
 #include "boost/tokenizer.hpp"
 
 #include "core/engine.hpp"
+#include "io/hdfs_manager.hpp"
 #include "io/input/hdfs_line_inputformat.hpp"
+
+std::string ghdfs_dest;
 
 class Group {
    public:
@@ -48,6 +51,7 @@ void cube() {
     std::string schema_conf = husky::Context::get_param("schema");
     std::string select_conf = husky::Context::get_param("select");
     std::string group_conf = husky::Context::get_param("group_sets");
+    ghdfs_dest = husky::Context::get_param("output");
     boost::char_separator<char> comma_sep(",");
     boost::char_separator<char> colon_sep(":");
     boost::tokenizer<boost::char_separator<char>> schema_tok(schema_conf, comma_sep);
@@ -106,32 +110,51 @@ void cube() {
                 if (std::find(select.begin(), select.end(), j) != select.end()) {
                     // j-th column is in the group set
                     if (std::find(group_sets[i].begin(), group_sets[i].end(), j) != group_sets[i].end()) {
-                        key += val;
+                        key = key + val + "\t";
                     } else {
-                        key += "*";
+                        key += "*\t";
                     }
-                    if (j == fuid_index) {
-                        fuid = val;
-                    }
+                } else if (j == fuid_index) {
+                    fuid = val;
                 }
                 ++j;
             }
+            key.pop_back();  // Remove trailing tab
             ch.push(fuid, key);
             key = "";
         }
     };
     husky::load(infmt, parser);
+    if (husky::Context::get_global_tid() == 0) {
+        husky::base::log_msg("Finished loading.");
+    }
+
+    constexpr bool write_hdfs = true;
+    std::string host = husky::Context::get_param("hdfs_namenode");
+    std::string port = husky::Context::get_param("hdfs_namenode_port");
 
     // Receive
-    husky::list_execute(group_list, [&ch](Group& g) {
-        std::string res;
+    husky::list_execute(group_list, [&ch, &host, &port, &ghdfs_dest](Group& g) {
+        std::string out;
         auto& msgs = ch.get(g);
         std::vector<std::string> uid(std::move(const_cast<std::vector<std::string>&>(msgs)));
-        res += std::to_string(uid.size());
+        out = out + "\t" + std::to_string(uid.size());
         std::sort(uid.begin(), uid.end());
-        auto last = std::unique(uid.begin(), uid.end());
-        res = res + " " + std::to_string(std::distance(uid.begin(), last));
-        husky::base::log_msg(g.id() + res);
+        // auto last = std::unique(uid.begin(), uid.end());
+        // out = out + "\t" + std::to_string(std::distance(uid.begin(), last));
+        int unique = 1;
+        for (auto it  = uid.begin(); it != uid.end(); ++it) {
+            auto next_it = it + 1;
+            if (next_it != uid.end() && (*next_it) != (*it)) {
+                unique++;
+            }
+        }
+        out = out + "\t" + std::to_string(unique);
+        if (write_hdfs) {
+            husky::io::HDFS::Write(host, port, g.id()+out+"\n", ghdfs_dest, husky::Context::get_global_tid());
+        } else {
+            husky::base::log_msg(g.id() + out);
+        }
     });
 }
 
@@ -143,6 +166,7 @@ int main(int argc, char** argv) {
     args.push_back("schema");
     args.push_back("select");
     args.push_back("group_sets");
+    args.push_back("output");
     if (husky::init_with_args(argc, argv, args)) {
         husky::run_job(cube);
         return 0;

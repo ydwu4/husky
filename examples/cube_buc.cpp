@@ -22,6 +22,7 @@
 #include "boost/tokenizer.hpp"
 
 #include "core/engine.hpp"
+#include "io/hdfs_manager.hpp"
 #include "io/input/hdfs_line_inputformat.hpp"
 
 typedef std::vector<int> Attribute;
@@ -29,6 +30,10 @@ typedef std::map<int, int> DimMap;
 typedef std::vector<std::string> Tuple;
 typedef std::vector<Tuple> TupleVector;
 typedef TupleVector::iterator TVIterator;
+
+std::string ghost;
+std::string gport;
+std::string ghdfs_dest;
 
 class Group {
    public:
@@ -65,6 +70,7 @@ class TreeNode {
 
     bool is_visited() { return is_visited_; }
 
+    // If the group (or key) of this node is a subset of the child
     bool is_parent(TreeNode* child) {
         auto child_key = child->Key();
         for (auto& col : key_) {
@@ -111,8 +117,13 @@ void measure(Tuple& key_value, const Attribute& group_attributes, Attribute& sel
     // Output
     std::string out;
     for (auto& attr : select) {
-        // Attribute is in key
-        // Output key value
+        // If attribute is in key,
+        //     output key value.
+        // Else,
+        //     If attribute is in group,
+        //         output attribute in the tuple
+        //     Else,
+        //         output *
         if (std::find(key_attributes.begin(), key_attributes.end(), attr) != key_attributes.end()) {
             out = out + key_value[key_dim_map[attr]] + "\t";
         } else {
@@ -125,9 +136,13 @@ void measure(Tuple& key_value, const Attribute& group_attributes, Attribute& sel
     }
 
     out = out + std::to_string(count) + "\t" + std::to_string(unique);
-    ;
 
-    husky::base::log_msg(out);
+    constexpr bool write_hdfs = true;
+    if (write_hdfs) {
+        husky::io::HDFS::Write(ghost, gport, out + "\n", ghdfs_dest, husky::Context::get_global_tid());
+    } else {
+        husky::base::log_msg(out);
+    }
 }
 
 int next_partition_dim(const Attribute& parent_key, const Attribute& child_key, DimMap& dim_map) {
@@ -140,14 +155,18 @@ int next_partition_dim(const Attribute& parent_key, const Attribute& child_key, 
     return -1;
 }
 
+// Parition the table according to value at the 'dim'-th column
 void partition(TVIterator begin, TVIterator end, int dim, std::vector<int>& out_partition_result) {
     std::sort(begin, end, [dim](const Tuple& a, const Tuple& b) { return a[dim] < b[dim]; });
     int i = 0;
+    // Store the size of each partition
     out_partition_result.resize(1);
     TVIterator next_tuple;
     for (TVIterator it = begin; it != end; ++it) {
         out_partition_result[i]++;
         next_tuple = it + 1;
+        // If value of next row differs at the dim-th column,
+        //     partition the table
         if (next_tuple != end && (*it)[dim] != (*next_tuple)[dim]) {
             ++i;
             out_partition_result.resize(i + 1);
@@ -160,7 +179,7 @@ void BUC(TreeNode* cur_node, TupleVector& table, Tuple& key_value, Attribute& se
     // Measure current group
     measure(key_value, cur_node->Key(), select, key_attributes, key_dim_map, msg_dim_map, uid_dim, begin, end);
 
-    // Process children
+    // Process children if it is not visited
     for (auto& child : cur_node->Children()) {
         if (!child->is_visited()) {
             child->Visit();
@@ -169,7 +188,7 @@ void BUC(TreeNode* cur_node, TupleVector& table, Tuple& key_value, Attribute& se
             // TODO(Ruihao): handle error if next_dim == -1
             std::vector<int> next_partition_result = {};
             partition(begin, end, next_dim, next_partition_result);
-
+            // Perform BUC on each partition
             TVIterator k = begin;
             for (int i = 0; i < next_partition_result.size(); ++i) {
                 int count = next_partition_result[i];
@@ -181,13 +200,14 @@ void BUC(TreeNode* cur_node, TupleVector& table, Tuple& key_value, Attribute& se
     }
 }
 
+// Make each node un-visited
 void reset_lattice(TreeNode* root) {
-	root->Reset();
-	for (auto child : root->Children()) {
-		if (child->is_visited()) {
-			reset_lattice(child);
-		}
-	}
+    root->Reset();
+    for (auto child : root->Children()) {
+        if (child->is_visited()) {
+            reset_lattice(child);
+        }
+    }
 }
 
 void cube_buc() {
@@ -196,6 +216,9 @@ void cube_buc() {
     std::string select_conf = husky::Context::get_param("select");
     std::string group_conf = husky::Context::get_param("group_sets");
     int part_factor = std::stoi(husky::Context::get_param("partition_factor"));
+    ghost = husky::Context::get_param("hdfs_namenode");
+    gport = husky::Context::get_param("hdfs_namenode_port");
+    ghdfs_dest = husky::Context::get_param("output");
     boost::char_separator<char> comma_sep(",");
     boost::char_separator<char> colon_sep(":");
     boost::tokenizer<boost::char_separator<char>> schema_tok(schema_conf, comma_sep);
@@ -215,9 +238,13 @@ void cube_buc() {
     TreeNode* root;
     int min_lv = INT_MAX;
     int max_lv = INT_MIN;
+
+    // Store nodes in a map with length of group (or level) as key
+    //     i.e., level => {nodes...}
     std::unordered_map<int, std::vector<TreeNode*>> tree_map;
     size_t group_set_size = std::distance(group_set_tok.begin(), group_set_tok.end());
     for (auto& group : group_set_tok) {
+        // Encode and construct key of the node
         boost::tokenizer<boost::char_separator<char>> colomn_tok(group, comma_sep);
         Attribute tree_key = {};
         for (auto column : colomn_tok) {
@@ -237,8 +264,14 @@ void cube_buc() {
             max_lv = node->Level();
         }
     }
-    husky::base::log_msg("Min level: " + std::to_string(min_lv) + "\tMax level: " + std::to_string(max_lv));
+
+    if (husky::Context::get_global_tid() == 0) {
+        husky::base::log_msg("Min level: " + std::to_string(min_lv) + "\tMax level: " + std::to_string(max_lv));
+    }
+
     // Build group set lattice
+    // For each level in the map,
+    //     compare each node with  all nodes in the upper level to find its parent
     for (int i = min_lv; i < max_lv; ++i) {
         if (tree_map[i].empty()) {
             throw husky::base::HuskyException("Empty level in the tree");
@@ -251,7 +284,27 @@ void cube_buc() {
             }
         }
     }
-    husky::base::log_msg("Finished constructing lattice.");
+    if (husky::Context::get_global_tid() == 0) {
+        husky::base::log_msg("Finished constructing lattice.");
+    }
+
+    // if (husky::Context::get_global_tid() == 0) {
+    //     std::queue<TreeNode*> q;
+    //     q.push(root);
+    //     root->Visit();
+    //     while (!q.empty()) {
+    //         TreeNode* cur_node = q.front();
+    //         q.pop();
+    //         print_key(cur_node->Key());
+    //         for (auto& child : cur_node->Children()) {
+    //             if (!child->is_visited()) {
+    //                 q.push(child);
+    //                 child->Visit();
+    //             }
+    //         }
+    //     }
+    //     reset_lattice(root);
+    // }
 
     // {key} union {msg} = {select}
     // {key} intersect {msg} = empty
@@ -279,23 +332,8 @@ void cube_buc() {
     int uid_index = -1;
     auto uid_it = std::find(schema_tok.begin(), schema_tok.end(), "fuid");
     if (uid_it != schema_tok.end()) {
-    	uid_index =  std::distance(schema_tok.begin(), uid_it);
+        uid_index = std::distance(schema_tok.begin(), uid_it);
     }
-
-    // std::queue<TreeNode*> q;
-    // q.push(root);
-    // root->Visit();
-    // while (!q.empty()) {
-    //     TreeNode* cur_node = q.front();
-    //     q.pop();
-    //     print_key(cur_node->Key());
-    //     for (auto& child : cur_node->Children()) {
-    //         if (!child->is_visited()) {
-    //             q.push(child);
-    //             child->Visit();
-    //         }
-    //     }
-    // }
 
     // Load input and emit key -> uid
     husky::io::HDFSLineInputFormat infmt;
@@ -332,7 +370,7 @@ void cube_buc() {
     husky::load(infmt, parser);
 
     // Receive
-    husky::list_execute(group_list, [&](Group & g) {
+    husky::list_execute(group_list, [&](Group& g) {
         auto& msgs = ch.get(g);
         TupleVector table(std::move(const_cast<TupleVector&>(msgs)));
         int uid_dim = msg_attributes.size();
@@ -353,10 +391,12 @@ int main(int argc, char** argv) {
     args.push_back("hdfs_namenode");
     args.push_back("hdfs_namenode_port");
     args.push_back("input");
+    args.push_back("output");
     args.push_back("schema");
     args.push_back("select");
     args.push_back("group_sets");
     args.push_back("partition_factor");
+
     if (husky::init_with_args(argc, argv, args)) {
         husky::run_job(cube_buc);
         return 0;
