@@ -14,7 +14,6 @@
 
 #include <climits>
 #include <map>
-#include <queue>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -53,7 +52,7 @@ class TreeNode {
     explicit TreeNode(Attribute&& key) : key_(std::move(key)) {
         // std::sort(key_.begin(), key_.end());
         lv_ = key_.size();
-        is_visited_ = false;
+        num_visitors_ = 0;
     }
 
     ~TreeNode() {
@@ -68,8 +67,6 @@ class TreeNode {
 
     int Level() { return lv_; }
 
-    bool is_visited() { return is_visited_; }
-
     // If the group (or key) of this node is a subset of the child
     bool is_parent(TreeNode* child) {
         auto child_key = child->Key();
@@ -83,15 +80,17 @@ class TreeNode {
 
     void add_child(TreeNode* child) { children_.push_back(child); }
 
-    void Visit() { is_visited_ = true; }
+    void Visit(const int partition_size) { num_visitors_ += partition_size; }
 
-    void Reset() { is_visited_ = false; }
+    int num_visitors() { return num_visitors_; }
+
+    void Reset() { num_visitors_ = 0; }
 
    private:
     Attribute key_;
     std::vector<TreeNode*> children_;
     int lv_;
-    bool is_visited_;
+    int num_visitors_;
 };
 
 void print_key(const Attribute& key) {
@@ -102,8 +101,9 @@ void print_key(const Attribute& key) {
     husky::base::log_msg(out);
 }
 
-void measure(Tuple& key_value, const Attribute& group_attributes, Attribute& select, Attribute& key_attributes,
-             DimMap& key_dim_map, DimMap& msg_dim_map, int uid_dim, TVIterator begin, TVIterator end) {
+void measure(const Tuple& key_value, const Attribute& group_attributes, const Attribute& select,
+             const Attribute& key_attributes, DimMap& key_dim_map, DimMap& msg_dim_map, const int uid_dim,
+             TVIterator begin, TVIterator end) {
     int count = end - begin;
     std::sort(begin, end, [uid_dim](const Tuple& a, const Tuple& b) { return a[uid_dim] < b[uid_dim]; });
     int unique = 1;
@@ -156,7 +156,7 @@ int next_partition_dim(const Attribute& parent_key, const Attribute& child_key, 
 }
 
 // Parition the table according to value at the 'dim'-th column
-void partition(TVIterator begin, TVIterator end, int dim, std::vector<int>& out_partition_result) {
+void partition(TVIterator begin, TVIterator end, const int dim, std::vector<int>& out_partition_result) {
     std::sort(begin, end, [dim](const Tuple& a, const Tuple& b) { return a[dim] < b[dim]; });
     int i = 0;
     // Store the size of each partition
@@ -174,15 +174,16 @@ void partition(TVIterator begin, TVIterator end, int dim, std::vector<int>& out_
     }
 }
 
-void BUC(TreeNode* cur_node, TupleVector& table, Tuple& key_value, Attribute& select, Attribute& key_attributes,
-         DimMap& key_dim_map, DimMap& msg_dim_map, int uid_dim, int dim, TVIterator begin, TVIterator end) {
+void BUC(TreeNode* cur_node, TupleVector& table, const Tuple& key_value, const Attribute& select,
+         const Attribute& key_attributes, DimMap& key_dim_map, DimMap& msg_dim_map, const int uid_dim, const int dim,
+         const int table_size, TVIterator begin, TVIterator end) {
     // Measure current group
     measure(key_value, cur_node->Key(), select, key_attributes, key_dim_map, msg_dim_map, uid_dim, begin, end);
+    cur_node->Visit(end - begin);
 
     // Process children if it is not visited
     for (auto& child : cur_node->Children()) {
-        if (!child->is_visited()) {
-            child->Visit();
+        if (child->num_visitors() < table_size) {
             // Partition table by next column
             int next_dim = next_partition_dim(cur_node->Key(), child->Key(), msg_dim_map);
             // TODO(Ruihao): handle error if next_dim == -1
@@ -192,8 +193,8 @@ void BUC(TreeNode* cur_node, TupleVector& table, Tuple& key_value, Attribute& se
             TVIterator k = begin;
             for (int i = 0; i < next_partition_result.size(); ++i) {
                 int count = next_partition_result[i];
-                BUC(child, table, key_value, select, key_attributes, key_dim_map, msg_dim_map, uid_dim, next_dim, k,
-                    k + count);
+                BUC(child, table, key_value, select, key_attributes, key_dim_map, msg_dim_map, uid_dim, next_dim,
+                    table_size, k, k + count);
                 k += count;
             }
         }
@@ -204,7 +205,7 @@ void BUC(TreeNode* cur_node, TupleVector& table, Tuple& key_value, Attribute& se
 void reset_lattice(TreeNode* root) {
     root->Reset();
     for (auto child : root->Children()) {
-        if (child->is_visited()) {
+        if (child->num_visitors()) {
             reset_lattice(child);
         }
     }
@@ -233,7 +234,7 @@ void cube_buc() {
         }
         // TODO(Ruihao): Throw expection if input is wrong?
     }
-    std::sort(select.begin(), select.end());
+    // std::sort(select.begin(), select.end());
     // Convert group sets to tree nodes
     TreeNode* root;
     int min_lv = INT_MAX;
@@ -348,14 +349,14 @@ void cube_buc() {
         boost::char_separator<char> sep("\t");
         boost::tokenizer<boost::char_separator<char>> tok(chunk, sep);
         std::string key = "";
-        Tuple msg = {};
+        Tuple msg(msg_attributes.size());
         std::string fuid;
         int j = 0;
         for (auto& col : tok) {
             if (std::find(key_attributes.begin(), key_attributes.end(), j) != key_attributes.end()) {
                 key = key + col + "\t";
             } else if (std::find(msg_attributes.begin(), msg_attributes.end(), j) != msg_attributes.end()) {
-                msg.push_back(col);
+                msg[msg_dim_map[j]] = col;
             } else if (j == uid_index) {
                 fuid = col;
             }
@@ -380,8 +381,8 @@ void cube_buc() {
         // Remove the hash value
         key_value.pop_back();
 
-        BUC(root, table, key_value, select, key_attributes, key_dim_map, msg_dim_map, uid_dim, 0, table.begin(),
-            table.end());
+        BUC(root, table, key_value, select, key_attributes, key_dim_map, msg_dim_map, uid_dim, 0, table.size(),
+            table.begin(), table.end());
         reset_lattice(root);
     });
 }
