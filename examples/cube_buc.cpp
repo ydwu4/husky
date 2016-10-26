@@ -29,10 +29,14 @@ typedef std::map<int, int> DimMap;
 typedef std::vector<std::string> Tuple;
 typedef std::vector<Tuple> TupleVector;
 typedef TupleVector::iterator TVIterator;
+typedef std::pair<int, int> Pair;
 
 std::string ghost;
 std::string gport;
 std::string ghdfs_dest;
+int gpart_factor;
+
+using husky::PushCombinedChannel;
 
 class Group {
    public:
@@ -44,6 +48,13 @@ class Group {
 
     const KeyT& id() { return key; }
     KeyT key;
+};
+
+struct PairSumCombiner {
+    static void combine(Pair& val, Pair const& inc) {
+        val.first += inc.first;
+        val.second += inc.second;
+    }
 };
 
 class TreeNode {
@@ -103,7 +114,7 @@ void print_key(const Attribute& key) {
 
 void measure(const Tuple& key_value, const Attribute& group_attributes, const Attribute& select,
              const Attribute& key_attributes, DimMap& key_dim_map, DimMap& msg_dim_map, const int uid_dim,
-             TVIterator begin, TVIterator end) {
+             TVIterator begin, TVIterator end, PushCombinedChannel<Pair, Group, PairSumCombiner>& post_ch) {
     int count = end - begin;
     std::sort(begin, end, [uid_dim](const Tuple& a, const Tuple& b) { return a[uid_dim] < b[uid_dim]; });
     int unique = 1;
@@ -135,13 +146,12 @@ void measure(const Tuple& key_value, const Attribute& group_attributes, const At
         }
     }
 
-    out = out + std::to_string(count) + "\t" + std::to_string(unique);
-
-    constexpr bool write_hdfs = true;
-    if (write_hdfs) {
+    if (gpart_factor == 1) {
+        out = out + std::to_string(count) + "\t" + std::to_string(unique);
         husky::io::HDFS::Write(ghost, gport, out + "\n", ghdfs_dest, husky::Context::get_global_tid());
     } else {
-        husky::base::log_msg(out);
+    	out.pop_back();  // Remove trailing tab
+    	post_ch.push(Pair(count, unique), out);
     }
 }
 
@@ -176,9 +186,10 @@ void partition(TVIterator begin, TVIterator end, const int dim, std::vector<int>
 
 void BUC(TreeNode* cur_node, TupleVector& table, const Tuple& key_value, const Attribute& select,
          const Attribute& key_attributes, DimMap& key_dim_map, DimMap& msg_dim_map, const int uid_dim, const int dim,
-         const int table_size, TVIterator begin, TVIterator end) {
+         const int table_size, TVIterator begin, TVIterator end,
+         PushCombinedChannel<Pair, Group, PairSumCombiner>& post_ch) {
     // Measure current group
-    measure(key_value, cur_node->Key(), select, key_attributes, key_dim_map, msg_dim_map, uid_dim, begin, end);
+    measure(key_value, cur_node->Key(), select, key_attributes, key_dim_map, msg_dim_map, uid_dim, begin, end, post_ch);
     cur_node->Visit(end - begin);
 
     // Process children if it is not visited
@@ -194,7 +205,7 @@ void BUC(TreeNode* cur_node, TupleVector& table, const Tuple& key_value, const A
             for (int i = 0; i < next_partition_result.size(); ++i) {
                 int count = next_partition_result[i];
                 BUC(child, table, key_value, select, key_attributes, key_dim_map, msg_dim_map, uid_dim, next_dim,
-                    table_size, k, k + count);
+                    table_size, k, k + count, post_ch);
                 k += count;
             }
         }
@@ -216,7 +227,7 @@ void cube_buc() {
     std::string schema_conf = husky::Context::get_param("schema");
     std::string select_conf = husky::Context::get_param("select");
     std::string group_conf = husky::Context::get_param("group_sets");
-    int part_factor = std::stoi(husky::Context::get_param("partition_factor"));
+    gpart_factor = std::stoi(husky::Context::get_param("partition_factor"));
     ghost = husky::Context::get_param("hdfs_namenode");
     gport = husky::Context::get_param("hdfs_namenode_port");
     ghdfs_dest = husky::Context::get_param("output");
@@ -289,24 +300,6 @@ void cube_buc() {
         husky::base::log_msg("Finished constructing lattice.");
     }
 
-    // if (husky::Context::get_global_tid() == 0) {
-    //     std::queue<TreeNode*> q;
-    //     q.push(root);
-    //     root->Visit();
-    //     while (!q.empty()) {
-    //         TreeNode* cur_node = q.front();
-    //         q.pop();
-    //         print_key(cur_node->Key());
-    //         for (auto& child : cur_node->Children()) {
-    //             if (!child->is_visited()) {
-    //                 q.push(child);
-    //                 child->Visit();
-    //             }
-    //         }
-    //     }
-    //     reset_lattice(root);
-    // }
-
     // {key} union {msg} = {select}
     // {key} intersect {msg} = empty
     Attribute key_attributes = root->Key();
@@ -340,8 +333,10 @@ void cube_buc() {
     husky::io::HDFSLineInputFormat infmt;
     infmt.set_input(husky::Context::get_param("input"));
 
-    auto& group_list = husky::ObjListFactory::create_objlist<Group>();
-    auto& ch = husky::ChannelFactory::create_push_channel<Tuple>(infmt, group_list);
+    auto& buc_list = husky::ObjListFactory::create_objlist<Group>("buc_list");
+    auto& buc_ch = husky::ChannelFactory::create_push_channel<Tuple>(infmt, buc_list);
+    auto& post_list = husky::ObjListFactory::create_objlist<Group>("post_list");
+    auto& post_ch = husky::ChannelFactory::create_push_combined_channel<Pair, PairSumCombiner>(buc_list, post_list);
 
     auto parser = [&](boost::string_ref& chunk) {
         if (chunk.size() == 0)
@@ -363,16 +358,18 @@ void cube_buc() {
             ++j;
         }
         msg.push_back(fuid);
-        int bucket = std::stoi(fuid) % part_factor;
+        int bucket = std::stoi(fuid) % gpart_factor;
         key += std::to_string(bucket);
-        ch.push(msg, key);
+        buc_ch.push(msg, key);
 
     };
     husky::load(infmt, parser);
 
     // Receive
-    husky::list_execute(group_list, [&](Group& g) {
-        auto& msgs = ch.get(g);
+    husky::list_execute(buc_list, [&](Group& g) {
+        auto& msgs = buc_ch.get(g);
+        // husky::io::HDFS::Write(ghost, gport, std::to_string(msgs.size()) + "\n", "/ruihao/buc/table_size",
+        // husky::Context::get_global_tid());
         TupleVector table(std::move(const_cast<TupleVector&>(msgs)));
         int uid_dim = msg_attributes.size();
         boost::char_separator<char> sep("\t");
@@ -382,9 +379,23 @@ void cube_buc() {
         key_value.pop_back();
 
         BUC(root, table, key_value, select, key_attributes, key_dim_map, msg_dim_map, uid_dim, 0, table.size(),
-            table.begin(), table.end());
+            table.begin(), table.end(), post_ch);
         reset_lattice(root);
     });
+
+    if (gpart_factor > 1) {
+    	if (husky::Context::get_global_tid() == 0) {
+    		husky::base::log_msg("Finished BUC stage.\nStart post process...");
+    	}
+
+    	husky::ObjListFactory::drop_objlist("buc_list");
+
+    	husky::list_execute(post_list, [&post_ch](Group& g) {
+    		auto& msg = post_ch.get(g);
+    		std::string out = g.id() + '\t' + std::to_string(msg.first) + '\t' + std::to_string(msg.second) + '\n';
+    		husky::io::HDFS::Write(ghost, gport, out, ghdfs_dest, husky::Context::get_global_tid());
+    	});
+    }
 }
 
 int main(int argc, char** argv) {
