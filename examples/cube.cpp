@@ -20,12 +20,12 @@
 
 #include "core/engine.hpp"
 #include "io/hdfs_manager.hpp"
-#include "io/input/hdfs_line_inputformat.hpp"
+#include "io/input/line_inputformat.hpp"
 #include "lib/aggregator_factory.hpp"
 
 using husky::lib::Aggregator;
 
-std::string ghdfs_dest;
+thread_local std::string ghdfs_dest;
 
 class Group {
    public:
@@ -95,7 +95,7 @@ void cube() {
     // TODO(Ruihao): Same
 
     // Load input and emit key -> uid
-    husky::io::HDFSLineInputFormat infmt;
+    husky::io::LineInputFormat infmt;
     infmt.set_input(husky::Context::get_param("input"));
 
     auto& group_list = husky::ObjListFactory::create_objlist<Group>();

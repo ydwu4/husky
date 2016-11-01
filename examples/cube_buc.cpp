@@ -23,7 +23,7 @@
 
 #include "core/engine.hpp"
 #include "io/hdfs_manager.hpp"
-#include "io/input/hdfs_line_inputformat.hpp"
+#include "io/input/line_inputformat.hpp"
 #include "lib/aggregator_factory.hpp"
 
 typedef std::vector<int> Attribute;
@@ -33,10 +33,10 @@ typedef std::vector<Tuple> TupleVector;
 typedef TupleVector::iterator TVIterator;
 typedef std::pair<int, int> Pair;
 
-std::string ghost;
-std::string gport;
-std::string ghdfs_dest;
-int gpart_factor;
+thread_local std::string ghost;
+thread_local std::string gport;
+thread_local std::string ghdfs_dest;
+thread_local int gpart_factor;
 
 using husky::PushCombinedChannel;
 using husky::lib::Aggregator;
@@ -83,7 +83,6 @@ class TreeNode {
     std::vector<TreeNode*> children_;
 };
 
-// If the group (or key) of this node is a subset of the child
 bool is_parent(TreeNode* parent, TreeNode* child) {
     auto child_key = child->Key();
     for (auto& col : parent->Key()) {
@@ -138,9 +137,9 @@ void measure(const Tuple& key_value, const Attribute& group_attributes, const At
     }
 
     if (gpart_factor == 1) {
-        out = out + std::to_string(count) + "\t" + std::to_string(unique);
+        out = out + std::to_string(count) + "\t" + std::to_string(unique) + "\n";
         agg.update(1);
-        husky::io::HDFS::Write(ghost, gport, out + "\n", ghdfs_dest, husky::Context::get_global_tid());
+        husky::io::HDFS::Write(ghost, gport, out, ghdfs_dest, husky::Context::get_global_tid());
     } else {
         out.pop_back();  // Remove trailing tab
         post_ch.push(Pair(count, unique), out);
@@ -216,18 +215,15 @@ void cube_buc() {
     boost::tokenizer<boost::char_separator<char>> schema_tok(schema_conf, comma_sep);
     boost::tokenizer<boost::char_separator<char>> select_tok(select_conf, comma_sep);
     boost::tokenizer<boost::char_separator<char>> group_set_tok(group_conf, colon_sep);
-    std::vector<std::string> schema_vec(schema_tok.begin(), schema_tok.end());
-
-    // Convert select to indices
     Attribute select;
     for (auto& s : select_tok) {
-        auto it = std::find(schema_vec.begin(), schema_vec.end(), s);
-        if (it != schema_vec.end()) {
-            select.push_back(std::distance(schema_vec.begin(), it));
+        auto it = std::find(schema_tok.begin(), schema_tok.end(), s);
+        if (it != schema_tok.end()) {
+            select.push_back(std::distance(schema_tok.begin(), it));
         }
         // TODO(Ruihao): Throw expection if input is wrong?
     }
-    // std::sort(select.begin(), select.end());
+
     // Convert group sets to tree nodes
     TreeNode* root;
     int min_lv = INT_MAX;
@@ -239,12 +235,14 @@ void cube_buc() {
     size_t group_set_size = std::distance(group_set_tok.begin(), group_set_tok.end());
     for (auto& group : group_set_tok) {
         // Encode and construct key of the node
-        boost::tokenizer<boost::char_separator<char>> colomn_tok(group, comma_sep);
+        boost::tokenizer<boost::char_separator<char>> column_tok(group, comma_sep);
+        // std::vector<std::string> column_tok;
+        // tokenize(group, comma_sep, column_tok);
         Attribute tree_key = {};
-        for (auto column : colomn_tok) {
-            auto it = std::find(schema_vec.begin(), schema_vec.end(), column);
-            if (it != schema_vec.end()) {
-                tree_key.push_back(std::distance(schema_vec.begin(), it));
+        for (auto column : column_tok) {
+            auto it = std::find(schema_tok.begin(), schema_tok.end(), column);
+            if (it != schema_tok.end()) {
+                tree_key.push_back(std::distance(schema_tok.begin(), it));
             }
             // TODO(Ruihao): Throw expection if input is wrong?
         }
@@ -330,13 +328,13 @@ void cube_buc() {
     }
 
     int uid_index = -1;
-    auto uid_it = std::find(schema_vec.begin(), schema_vec.end(), "fuid");
-    if (uid_it != schema_vec.end()) {
-        uid_index = std::distance(schema_vec.begin(), uid_it);
+    auto uid_it = std::find(schema_tok.begin(), schema_tok.end(), "fuid");
+    if (uid_it != schema_tok.end()) {
+        uid_index = std::distance(schema_tok.begin(), uid_it);
     }
 
     // Load input and emit key -> uid
-    husky::io::HDFSLineInputFormat infmt;
+    husky::io::LineInputFormat infmt;
     infmt.set_input(husky::Context::get_param("input"));
 
     auto& buc_list = husky::ObjListFactory::create_objlist<Group>("buc_list");
@@ -368,8 +366,10 @@ void cube_buc() {
             ++j;
         }
         msg.push_back(fuid);
-        int bucket = std::stoi(fuid) % gpart_factor;
-        key += std::to_string(bucket);
+        if (gpart_factor > 1) {
+            int bucket = std::stoi(fuid) % gpart_factor;
+            key += std::to_string(bucket);
+        }
         buc_ch.push(msg, key);
 
     };
@@ -378,8 +378,6 @@ void cube_buc() {
     // Receive
     husky::list_execute(buc_list, {&buc_ch}, {&post_ch, &agg_ch}, [&](Group& g) {
         auto& msgs = buc_ch.get(g);
-        // husky::io::HDFS::Write(ghost, gport, std::to_string(msgs.size()) + "\n", "/ruihao/buc/table_size",
-        // husky::Context::get_global_tid());
         TupleVector table(std::move(const_cast<TupleVector&>(msgs)));
         int uid_dim = msg_attributes.size();
         boost::char_separator<char> sep("\t");
@@ -399,7 +397,7 @@ void cube_buc() {
 
         husky::ObjListFactory::drop_objlist("buc_list");
 
-        husky::list_execute(post_list, {&post_ch}, {&agg_ch}, [&post_ch, &agg](Group & g) {
+        husky::list_execute(post_list, {&post_ch}, {&agg_ch}, [&post_ch, &agg](Group& g) {
             auto& msg = post_ch.get(g);
             std::string out = g.id() + '\t' + std::to_string(msg.first) + '\t' + std::to_string(msg.second) + '\n';
             agg.update(1);
