@@ -14,6 +14,7 @@
 
 #include <climits>
 #include <map>
+#include <memory>
 #include <stack>
 #include <string>
 #include <unordered_map>
@@ -74,16 +75,16 @@ class TreeNode {
 
     const Attribute& Key() { return key_; }
 
-    std::vector<TreeNode*>& Children() { return children_; }
+    std::vector<std::shared_ptr<TreeNode>>& Children() { return children_; }
 
-    void add_child(TreeNode* child) { children_.push_back(child); }
+    void add_child(std::shared_ptr<TreeNode> child) { children_.push_back(child); }
 
    private:
     Attribute key_;
-    std::vector<TreeNode*> children_;
+    std::vector<std::shared_ptr<TreeNode>> children_;
 };
 
-bool is_parent(TreeNode* parent, TreeNode* child) {
+bool is_parent(std::shared_ptr<TreeNode> parent, std::shared_ptr<TreeNode> child) {
     auto child_key = child->Key();
     for (auto& col : parent->Key()) {
         if (std::find(child_key.begin(), child_key.end(), col) == child_key.end()) {
@@ -175,7 +176,7 @@ void partition(TVIterator begin, TVIterator end, const int dim, std::vector<int>
     }
 }
 
-void BUC(TreeNode* cur_node, TupleVector& table, const Tuple& key_value, const Attribute& select,
+void BUC(std::shared_ptr<TreeNode> cur_node, TupleVector& table, const Tuple& key_value, const Attribute& select,
          const Attribute& key_attributes, DimMap& key_dim_map, DimMap& msg_dim_map, const int uid_dim, const int dim,
          const int table_size, TVIterator begin, TVIterator end,
          PushCombinedChannel<Pair, Group, PairSumCombiner>& post_ch, Aggregator<int>& agg) {
@@ -225,13 +226,13 @@ void cube_buc() {
     }
 
     // Convert group sets to tree nodes
-    TreeNode* root;
+    std::shared_ptr<TreeNode> root;
     int min_lv = INT_MAX;
     int max_lv = INT_MIN;
 
     // Store nodes in a map with length of group (or level) as key
     //     i.e., level => {nodes...}
-    std::unordered_map<int, std::vector<TreeNode*>> tree_map;
+    std::unordered_map<int, std::vector<std::shared_ptr<TreeNode>>> tree_map;
     size_t group_set_size = std::distance(group_set_tok.begin(), group_set_tok.end());
     for (auto& group : group_set_tok) {
         // Encode and construct key of the node
@@ -247,7 +248,7 @@ void cube_buc() {
             // TODO(Ruihao): Throw expection if input is wrong?
         }
         int level = tree_key.size();
-        TreeNode* node = new TreeNode(std::move(tree_key));
+        std::shared_ptr<TreeNode> node(new TreeNode(std::move(tree_key)));
         tree_map[level].push_back(node);
         if (level < min_lv) {
             min_lv = level;
@@ -282,21 +283,21 @@ void cube_buc() {
     }
 
     // Construct BUC processing tree
-    TreeNode* dfs_root = new TreeNode(root->Key());
-    std::stack<TreeNode*> tmp_stack;
-    std::stack<TreeNode*> dfs_stack;
+    std::shared_ptr<TreeNode> dfs_root(new TreeNode(root->Key()));
+    std::stack<std::shared_ptr<TreeNode>> tmp_stack;
+    std::stack<std::shared_ptr<TreeNode>> dfs_stack;
     tmp_stack.push(root);
     dfs_stack.push(dfs_root);
     while (!tmp_stack.empty()) {
-        TreeNode* cur_node = tmp_stack.top();
+        std::shared_ptr<TreeNode> cur_node = tmp_stack.top();
         tmp_stack.pop();
-        TreeNode* cur_dfs_node = dfs_stack.top();
+        std::shared_ptr<TreeNode> cur_dfs_node = dfs_stack.top();
         dfs_stack.pop();
         cur_node->visit = true;
         for (auto& child : cur_node->Children()) {
             if (!child->visit) {
                 tmp_stack.push(child);
-                TreeNode* new_dfs_node = new TreeNode(child->Key());
+                std::shared_ptr<TreeNode> new_dfs_node(new TreeNode(child->Key()));
                 cur_dfs_node->add_child(new_dfs_node);
                 dfs_stack.push(new_dfs_node);
             }
