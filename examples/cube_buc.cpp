@@ -94,12 +94,12 @@ bool is_parent(std::shared_ptr<TreeNode> parent, std::shared_ptr<TreeNode> child
     return true;
 }
 
-void print_key(const Attribute& key) {
+std::string print_key(const Attribute& key) {
     std::string out;
     for (auto& i : key) {
         out = out + std::to_string(i) + " ";
     }
-    husky::base::log_msg(out);
+    return out;
 }
 
 void measure(const Tuple& key_value, const Attribute& group_attributes, const Attribute& select,
@@ -266,16 +266,22 @@ void cube_buc() {
     // Build group set lattice
     // For each level in the map,
     //     compare each node with  all nodes in the upper level to find its parent
+    bool has_parent = false;
     for (int i = min_lv; i < max_lv; ++i) {
         if (tree_map[i].empty()) {
-            throw husky::base::HuskyException("Empty level in the tree");
+            throw husky::base::HuskyException("Level " + std::to_string(i) + " is empty");
         }
-        for (auto& tn : tree_map[i]) {
-            for (auto& next_tn : tree_map[i + 1]) {
+        for (auto& next_tn : tree_map[i + 1]) {
+            for (auto& tn : tree_map[i]) {
                 if (is_parent(tn, next_tn)) {
                     tn->add_child(next_tn);
+                    has_parent = true;
                 }
             }
+            if (!has_parent) {
+            	throw husky::base::HuskyException("Cannot find the parent of " + print_key(next_tn->Key()));
+            }
+            has_parent = false;
         }
     }
     if (husky::Context::get_global_tid() == 0) {
@@ -303,7 +309,6 @@ void cube_buc() {
             }
         }
     }
-    // delete root;
 
     // {key} union {msg} = {select}
     // {key} intersect {msg} = empty
